@@ -1,4 +1,4 @@
-"""Rendering utilities: board drawing, Grad-CAM overlay, info panel, and video export."""
+"""Board rendering, Grad-CAM overlay, info panel, and video export."""
 
 from __future__ import annotations
 
@@ -12,13 +12,9 @@ import matplotlib.cm as cm
 import numpy as np
 import imageio.v3 as iio
 
-# Action labels used in the info panel
 ACTION_NAMES = ["Up", "Down", "Left", "Right"]
-
-# Pixel size of one grid cell
 CELL_PX = 30
 
-# Colours (RGB uint8)
 _BG = np.array([30, 30, 30], dtype=np.uint8)
 _HEAD = np.array([0, 200, 80], dtype=np.uint8)
 _BODY = np.array([0, 150, 60], dtype=np.uint8)
@@ -26,25 +22,8 @@ _FOOD = np.array([220, 50, 50], dtype=np.uint8)
 _GRID_LINE = np.array([55, 55, 55], dtype=np.uint8)
 
 
-# ------------------------------------------------------------------
-# Board rendering
-# ------------------------------------------------------------------
-
 def render_board(state: np.ndarray, grid_size: int) -> np.ndarray:
-    """Draw the Snake board from the multi-channel state tensor.
-
-    Parameters
-    ----------
-    state : np.ndarray
-        Shape (C, H, W) float32 state tensor.
-    grid_size : int
-        Number of cells per side.
-
-    Returns
-    -------
-    np.ndarray
-        RGB image of shape (grid_size * CELL_PX, grid_size * CELL_PX, 3), uint8.
-    """
+    """Draw the Snake board from the multi-channel state tensor."""
     size = grid_size * CELL_PX
     img = np.tile(_BG, (size, size, 1)).copy()
 
@@ -60,12 +39,12 @@ def render_board(state: np.ndarray, grid_size: int) -> np.ndarray:
             if head_ch[r, c] > 0:
                 img[y0:y1, x0:x1] = _HEAD
             elif body_ch[r, c] > 0:
+                # Fade body colour by the gradient value to show ordering
                 alpha = body_ch[r, c]
                 img[y0:y1, x0:x1] = (_BODY.astype(np.float32) * alpha).astype(np.uint8)
             elif food_ch[r, c] > 0:
                 img[y0:y1, x0:x1] = _FOOD
 
-    # Grid lines
     for i in range(grid_size + 1):
         px = i * CELL_PX
         img[px : px + 1, :] = _GRID_LINE
@@ -74,33 +53,14 @@ def render_board(state: np.ndarray, grid_size: int) -> np.ndarray:
     return img
 
 
-# ------------------------------------------------------------------
-# Heatmap overlay
-# ------------------------------------------------------------------
-
 def overlay_heatmap(
     board_img: np.ndarray, heatmap: np.ndarray, alpha: float = 0.45
 ) -> np.ndarray:
-    """Blend a Grad-CAM heatmap onto the board image.
-
-    Parameters
-    ----------
-    board_img : np.ndarray
-        RGB board image (H_px, W_px, 3) uint8.
-    heatmap : np.ndarray
-        2-D array (grid_h, grid_w) with values in [0, 1].
-    alpha : float
-        Blending weight for the heatmap colour.
-
-    Returns
-    -------
-    np.ndarray
-        Blended RGB image, same shape as *board_img*, uint8.
-    """
+    """Alpha-blend a Grad-CAM heatmap (jet colourmap) onto the board image."""
     h, w, _ = board_img.shape
-    # Upscale heatmap to pixel resolution using nearest-neighbour
+    # Nearest-neighbour upscale so each cell gets a uniform colour
     hm_large = np.kron(heatmap, np.ones((CELL_PX, CELL_PX)))
-    hm_large = hm_large[:h, :w]  # trim if rounding issues
+    hm_large = hm_large[:h, :w]
 
     colour_map = cm.get_cmap("jet")
     hm_rgb = (colour_map(hm_large)[:, :, :3] * 255).astype(np.uint8)
@@ -113,10 +73,6 @@ def overlay_heatmap(
     return blended
 
 
-# ------------------------------------------------------------------
-# Info panel (matplotlib figure -> numpy)
-# ------------------------------------------------------------------
-
 def render_info_panel(
     action: int,
     q_values: np.ndarray,
@@ -125,14 +81,8 @@ def render_info_panel(
     episode: int | None = None,
     panel_height_px: int | None = None,
 ) -> np.ndarray:
-    """Render a side panel with action, Q-value bar chart, score, and step.
-
-    Returns
-    -------
-    np.ndarray
-        RGB image (panel_height_px, panel_width_px, 3) uint8.
-    """
-    fig_h = (panel_height_px or 360) / 100  # inches at 100 dpi
+    """Render a matplotlib side panel showing Q-values, action, and score."""
+    fig_h = (panel_height_px or 360) / 100
     fig, ax = plt.subplots(figsize=(3.0, fig_h), dpi=100)
     fig.patch.set_facecolor("#1e1e1e")
     ax.set_facecolor("#1e1e1e")
@@ -153,6 +103,7 @@ def render_info_panel(
 
     fig.tight_layout()
 
+    # Rasterize the figure to a numpy array
     fig.canvas.draw()
     buf = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8)
     buf = buf.reshape(fig.canvas.get_width_height()[::-1] + (4,))
@@ -162,19 +113,12 @@ def render_info_panel(
     return panel
 
 
-# ------------------------------------------------------------------
-# Frame composition
-# ------------------------------------------------------------------
-
 def compose_frame(
     board_img: np.ndarray,
     overlay_img: np.ndarray,
     info_panel: np.ndarray,
 ) -> np.ndarray:
-    """Stitch board, overlay, and info panel side-by-side.
-
-    All images are resized vertically to match the tallest one.
-    """
+    """Stitch board, overlay, and info panel side-by-side, padding height to match."""
     target_h = max(board_img.shape[0], overlay_img.shape[0], info_panel.shape[0])
 
     def _pad_v(img: np.ndarray) -> np.ndarray:
@@ -187,12 +131,8 @@ def compose_frame(
     return np.hstack([_pad_v(board_img), _pad_v(overlay_img), _pad_v(info_panel)])
 
 
-# ------------------------------------------------------------------
-# Video / GIF export
-# ------------------------------------------------------------------
-
 def save_video(frames: list[np.ndarray], path: str, fps: int = 8) -> None:
-    """Write a list of RGB uint8 frames to an MP4 or GIF file."""
+    """Write frames to MP4 or GIF depending on file extension."""
     p = Path(path)
     if p.suffix.lower() == ".gif":
         iio.imwrite(p, frames, duration=int(1000 / fps), loop=0)

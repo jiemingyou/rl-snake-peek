@@ -17,6 +17,7 @@ def parse_args() -> Config:
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--eps-decay-steps", type=int, default=100_000)
+    parser.add_argument("--num-envs", type=int, default=32)
     parser.add_argument("--buffer-size", type=int, default=100_000)
     parser.add_argument("--min-buffer", type=int, default=10_000)
     parser.add_argument("--target-update-freq", type=int, default=1000)
@@ -34,6 +35,7 @@ def parse_args() -> Config:
         lr=args.lr,
         gamma=args.gamma,
         eps_decay_steps=args.eps_decay_steps,
+        num_envs=args.num_envs,
         buffer_size=args.buffer_size,
         min_buffer=args.min_buffer,
         target_update_freq=args.target_update_freq,

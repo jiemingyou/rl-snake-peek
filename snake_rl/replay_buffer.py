@@ -43,6 +43,42 @@ class ReplayBuffer:
         self.pos = (self.pos + 1) % self.capacity
         self.size = min(self.size + 1, self.capacity)
 
+    def push_batch(
+        self,
+        states: np.ndarray,
+        actions: np.ndarray,
+        rewards: np.ndarray,
+        next_states: np.ndarray,
+        dones: np.ndarray,
+    ) -> None:
+        """Insert N transitions at once. Arrays have leading dim N."""
+        n = states.shape[0]
+        if self.pos + n <= self.capacity:
+            s = slice(self.pos, self.pos + n)
+            self.states[s] = states
+            self.actions[s] = actions
+            self.rewards[s] = rewards
+            self.next_states[s] = next_states
+            self.dones[s] = dones
+        else:
+            # Wraps around the end of the buffer
+            first = self.capacity - self.pos
+            self.states[self.pos :] = states[:first]
+            self.actions[self.pos :] = actions[:first]
+            self.rewards[self.pos :] = rewards[:first]
+            self.next_states[self.pos :] = next_states[:first]
+            self.dones[self.pos :] = dones[:first]
+
+            rest = n - first
+            self.states[:rest] = states[first:]
+            self.actions[:rest] = actions[first:]
+            self.rewards[:rest] = rewards[first:]
+            self.next_states[:rest] = next_states[first:]
+            self.dones[:rest] = dones[first:]
+
+        self.pos = (self.pos + n) % self.capacity
+        self.size = min(self.size + n, self.capacity)
+
     def sample(
         self, batch_size: int, device: torch.device | str = "cpu"
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:

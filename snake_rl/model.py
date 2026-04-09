@@ -9,8 +9,8 @@ from snake_rl.config import Config
 class DQN(nn.Module):
     """CNN-based Deep Q-Network.
 
-    No pooling layers — feature maps stay at (grid_size x grid_size) throughout
-    so Grad-CAM heatmaps are natively grid-aligned.
+    Uses padding=1 with no pooling so feature maps stay at grid_size x grid_size.
+    This means Grad-CAM heatmaps are natively grid-aligned with no upsampling needed.
     """
 
     def __init__(self, config: Config | None = None):

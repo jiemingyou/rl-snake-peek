@@ -13,19 +13,19 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 from snake_rl.config import Config
-from snake_rl.environment import SnakeEnv
 from snake_rl.model import DQN
 from snake_rl.replay_buffer import ReplayBuffer
+from snake_rl.environment import VecSnakeEnv
 
 
 class Trainer:
-    """Standard DQN trainer with epsilon-greedy exploration."""
+    """DQN trainer using a vectorized environment for parallel data collection."""
 
     def __init__(self, config: Config | None = None):
         self.cfg = config or Config()
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        self.env = SnakeEnv(self.cfg)
+        self.vec_env = VecSnakeEnv(self.cfg)
         self.policy_net = DQN(self.cfg).to(self.device)
         self.target_net = DQN(self.cfg).to(self.device)
         self.target_net.load_state_dict(self.policy_net.state_dict())
@@ -41,29 +41,20 @@ class Trainer:
         tb_dir = os.path.join(self.cfg.tb_log_dir, run_name)
         self.tb = SummaryWriter(log_dir=tb_dir)
 
-    # ------------------------------------------------------------------
-    # Epsilon schedule
-    # ------------------------------------------------------------------
-
     def _epsilon(self, step: int) -> float:
+        """Linear decay from eps_start to eps_end over eps_decay_steps."""
         frac = min(1.0, step / self.cfg.eps_decay_steps)
         return self.cfg.eps_start + frac * (self.cfg.eps_end - self.cfg.eps_start)
 
-    # ------------------------------------------------------------------
-    # Action selection
-    # ------------------------------------------------------------------
-
-    def _select_action(self, state: np.ndarray, eps: float) -> int:
-        if np.random.rand() < eps:
-            return np.random.randint(self.cfg.num_actions)
+    def _select_actions(self, states: np.ndarray, eps: float) -> np.ndarray:
+        """Batched epsilon-greedy: one forward pass for all N envs."""
+        n = states.shape[0]
         with torch.no_grad():
-            t = torch.from_numpy(state).unsqueeze(0).to(self.device)
-            q = self.policy_net(t)
-            return int(q.argmax(dim=1).item())
-
-    # ------------------------------------------------------------------
-    # TD loss (Huber)
-    # ------------------------------------------------------------------
+            t = torch.from_numpy(states).to(self.device)
+            greedy = self.policy_net(t).argmax(dim=1).cpu().numpy()
+        rand_mask = np.random.rand(n) < eps
+        random_acts = np.random.randint(0, self.cfg.num_actions, size=n)
+        return np.where(rand_mask, random_acts, greedy)
 
     def _compute_loss(
         self,
@@ -81,19 +72,14 @@ class Trainer:
 
         return nn.functional.smooth_l1_loss(q_values, target)
 
-    # ------------------------------------------------------------------
-    # Main training loop
-    # ------------------------------------------------------------------
-
     def train(self) -> None:
         cfg = self.cfg
-        state = self.env.reset()
+        n = cfg.num_envs
+        states = self.vec_env.reset_all()
 
-        # Per-episode accumulators
-        ep_reward = 0.0
+        ep_rewards = np.zeros(n, dtype=np.float32)
         ep_count = 0
 
-        # Rolling stats for logging
         recent_rewards: list[float] = []
         recent_lengths: list[int] = []
         recent_steps_alive: list[int] = []
@@ -117,16 +103,41 @@ class Trainer:
             ]
         )
 
-        pbar = tqdm(range(1, cfg.total_steps + 1), desc="Training", unit="step")
-        for step in pbar:
-            eps = self._epsilon(step)
-            action = self._select_action(state, eps)
-            next_state, reward, done, info = self.env.step(action)
-            self.buffer.push(state, action, reward, next_state, done)
-            state = next_state
-            ep_reward += reward
+        total_transitions = 0
+        pbar = tqdm(total=cfg.total_steps, desc="Training", unit="step")
 
-            # Learn
+        while total_transitions < cfg.total_steps:
+            eps = self._epsilon(total_transitions)
+            actions = self._select_actions(states, eps)
+
+            next_states, rewards, dones, infos = self.vec_env.step(actions)
+
+            self.buffer.push_batch(
+                states,
+                actions.astype(np.int64),
+                rewards,
+                next_states,
+                dones.astype(np.float32),
+            )
+
+            ep_rewards += rewards
+
+            done_idx = np.where(dones)[0]
+            for i in done_idx:
+                recent_rewards.append(float(ep_rewards[i]))
+                recent_lengths.append(int(infos["length"][i]))
+                recent_steps_alive.append(int(infos["steps_alive"][i]))
+
+                self.tb.add_scalar("episode/reward", ep_rewards[i], ep_count)
+                self.tb.add_scalar("episode/length", infos["length"][i], ep_count)
+                self.tb.add_scalar("episode/steps_alive", infos["steps_alive"][i], ep_count)
+                ep_count += 1
+
+            ep_rewards[done_idx] = 0.0
+
+            states = next_states
+            total_transitions += n
+
             if len(self.buffer) >= cfg.min_buffer:
                 batch = self.buffer.sample(cfg.batch_size, self.device)
                 loss = self._compute_loss(*batch)
@@ -140,26 +151,13 @@ class Trainer:
                     q_accum += self.policy_net(batch[0]).max(dim=1).values.mean().item()
                 learn_count += 1
 
-            # Target network sync
-            if step % cfg.target_update_freq == 0:
+            # Use < n because total_transitions jumps by n each iteration
+            if total_transitions % cfg.target_update_freq < n:
                 self.target_net.load_state_dict(self.policy_net.state_dict())
 
-            # Episode end
-            if done:
-                recent_rewards.append(ep_reward)
-                recent_lengths.append(info["length"])
-                recent_steps_alive.append(info["steps_alive"])
+            pbar.update(n)
 
-                self.tb.add_scalar("episode/reward", ep_reward, ep_count)
-                self.tb.add_scalar("episode/length", info["length"], ep_count)
-                self.tb.add_scalar("episode/steps_alive", info["steps_alive"], ep_count)
-
-                ep_reward = 0.0
-                ep_count += 1
-                state = self.env.reset()
-
-            # Logging
-            if step % cfg.log_every == 0 and recent_rewards:
+            if total_transitions % cfg.log_every < n and recent_rewards:
                 mean_r = np.mean(recent_rewards)
                 mean_l = np.mean(recent_lengths)
                 mean_s = np.mean(recent_steps_alive)
@@ -168,7 +166,7 @@ class Trainer:
 
                 writer.writerow(
                     [
-                        step,
+                        total_transitions,
                         ep_count,
                         f"{eps:.4f}",
                         f"{mean_r:.3f}",
@@ -180,12 +178,12 @@ class Trainer:
                 )
                 log_file.flush()
 
-                self.tb.add_scalar("train/mean_reward", mean_r, step)
-                self.tb.add_scalar("train/mean_length", mean_l, step)
-                self.tb.add_scalar("train/mean_steps_alive", mean_s, step)
-                self.tb.add_scalar("train/loss", mean_loss, step)
-                self.tb.add_scalar("train/mean_q", mean_q, step)
-                self.tb.add_scalar("train/epsilon", eps, step)
+                self.tb.add_scalar("train/mean_reward", mean_r, total_transitions)
+                self.tb.add_scalar("train/mean_length", mean_l, total_transitions)
+                self.tb.add_scalar("train/mean_steps_alive", mean_s, total_transitions)
+                self.tb.add_scalar("train/loss", mean_loss, total_transitions)
+                self.tb.add_scalar("train/mean_q", mean_q, total_transitions)
+                self.tb.add_scalar("train/epsilon", eps, total_transitions)
 
                 pbar.set_postfix(
                     eps=f"{eps:.3f}",
@@ -202,20 +200,16 @@ class Trainer:
                 q_accum = 0.0
                 learn_count = 0
 
-            # Checkpointing
-            if step % cfg.checkpoint_every == 0:
-                self._save_checkpoint(step)
+            if total_transitions % cfg.checkpoint_every < n:
+                self._save_checkpoint(total_transitions)
 
-        # Final save
-        self._save_checkpoint(cfg.total_steps)
+        pbar.close()
+
+        self._save_checkpoint(total_transitions)
         log_file.close()
         self.tb.close()
         print(f"\nTraining complete. Logs saved to {log_path}")
         print(f"TensorBoard logs in {cfg.tb_log_dir}/  — run: tensorboard --logdir {cfg.tb_log_dir}")
-
-    # ------------------------------------------------------------------
-    # Checkpoint I/O
-    # ------------------------------------------------------------------
 
     def _save_checkpoint(self, step: int) -> None:
         path = os.path.join(self.cfg.checkpoint_dir, f"step_{step}.pt")
@@ -228,4 +222,4 @@ class Trainer:
             },
             path,
         )
-        tqdm.write(f"  ✓ Checkpoint saved: {path}")
+        tqdm.write(f"  Checkpoint saved: {path}")

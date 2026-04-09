@@ -1,3 +1,5 @@
+"""Snake environments: single-game (SnakeEnv) and vectorized (VecSnakeEnv)."""
+
 from __future__ import annotations
 
 import random
@@ -8,10 +10,8 @@ import numpy as np
 
 from snake_rl.config import Config
 
-# Actions (absolute directions)
 UP, DOWN, LEFT, RIGHT = 0, 1, 2, 3
 
-# Direction vectors: (row_delta, col_delta)
 DIRECTION_DELTA = {
     UP: (-1, 0),
     DOWN: (1, 0),
@@ -19,12 +19,18 @@ DIRECTION_DELTA = {
     RIGHT: (0, 1),
 }
 
-# Opposite directions – the snake cannot reverse into itself
+# Used to prevent the snake from reversing into itself
 OPPOSITE = {UP: DOWN, DOWN: UP, LEFT: RIGHT, RIGHT: LEFT}
+
+# Lookup tables indexed by action id for vectorized head movement
+_DR = np.array([-1, 1, 0, 0], dtype=np.int32)
+_DC = np.array([0, 0, -1, 1], dtype=np.int32)
+_OPPOSITE = np.array([DOWN, UP, RIGHT, LEFT], dtype=np.int32)
+_DIR_VAL = np.array([0.25, 0.50, 0.75, 1.0], dtype=np.float32)
 
 
 class SnakeEnv:
-    """Grid-based Snake environment with a multi-channel state tensor."""
+    """Single-game Snake environment used for evaluation and sanity checks."""
 
     def __init__(self, config: Config | None = None):
         self.cfg = config or Config()
@@ -32,13 +38,9 @@ class SnakeEnv:
         self.max_steps = self.cfg.max_steps_per_episode
         self.reset()
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
     def reset(self) -> np.ndarray:
         mid = self.grid_size // 2
-        self.snake = deque([(mid, mid)])  # head is snake[0]
+        self.snake = deque([(mid, mid)])
         self.direction = RIGHT
         self.food = self._place_food()
         self.done = False
@@ -50,28 +52,23 @@ class SnakeEnv:
         if self.done:
             raise RuntimeError("step() called on a finished episode; call reset().")
 
-        # Ignore action that would reverse the snake
         if len(self.snake) > 1 and action == OPPOSITE.get(self.direction):
             action = self.direction
         self.direction = action
 
-        # Compute new head position
         dr, dc = DIRECTION_DELTA[self.direction]
         head_r, head_c = self.snake[0]
         new_head = (head_r + dr, head_c + dc)
 
-        # Check wall collision
         r, c = new_head
         if r < 0 or r >= self.grid_size or c < 0 or c >= self.grid_size:
             self.done = True
             return self._get_state(), self.cfg.death_penalty, True, self._info()
 
-        # Check self-collision
         if new_head in self.snake:
             self.done = True
             return self._get_state(), self.cfg.death_penalty, True, self._info()
 
-        # Move
         self.snake.appendleft(new_head)
         reward = self.cfg.step_penalty
 
@@ -80,7 +77,7 @@ class SnakeEnv:
             self.score += 1
             self.food = self._place_food()
         else:
-            self.snake.pop()  # remove tail
+            self.snake.pop()
 
         self.steps_alive += 1
         if self.steps_alive >= self.max_steps:
@@ -88,21 +85,16 @@ class SnakeEnv:
 
         return self._get_state(), reward, self.done, self._info()
 
-    # ------------------------------------------------------------------
-    # State construction
-    # ------------------------------------------------------------------
-
     def _get_state(self) -> np.ndarray:
-        """Return a (NUM_CHANNELS, grid_size, grid_size) float32 array."""
+        """Build a (C, H, W) float32 state tensor with 4 semantic channels."""
         state = np.zeros(
             (self.cfg.num_channels, self.grid_size, self.grid_size), dtype=np.float32
         )
 
-        # Channel 0: head
         hr, hc = self.snake[0]
         state[0, hr, hc] = 1.0
 
-        # Channel 1: body (gradient from 1.0 at neck to 0.5 at tail)
+        # Body channel uses a gradient so the model can distinguish head-end from tail-end
         body_len = len(self.snake) - 1
         for idx, (br, bc) in enumerate(list(self.snake)[1:]):
             if body_len == 1:
@@ -110,20 +102,15 @@ class SnakeEnv:
             else:
                 state[1, br, bc] = 1.0 - 0.5 * (idx / (body_len - 1))
 
-        # Channel 2: food
         if self.food is not None:
             fr, fc = self.food
             state[2, fr, fc] = 1.0
 
-        # Channel 3: direction encoded at head position
+        # Encode direction as a scalar at the head cell so the model knows current heading
         dir_val = {UP: 0.25, DOWN: 0.50, LEFT: 0.75, RIGHT: 1.0}
         state[3, hr, hc] = dir_val[self.direction]
 
         return state
-
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
 
     def _place_food(self) -> tuple[int, int] | None:
         occupied = set(self.snake)
@@ -139,3 +126,175 @@ class SnakeEnv:
 
     def _info(self) -> dict[str, Any]:
         return {"length": len(self.snake), "steps_alive": self.steps_alive}
+
+
+class VecSnakeEnv:
+    """N independent Snake games stepped in lockstep via batched numpy arrays.
+
+    Body tracking uses a countdown-timer grid: each occupied cell stores the
+    number of steps until that segment disappears. On every step, all nonzero
+    cells are decremented by 1, and the new head cell is set to ``length``.
+    This replaces per-snake deques with a single array operation.
+    """
+
+    def __init__(self, config: Config | None = None):
+        self.cfg = config or Config()
+        self.n = self.cfg.num_envs
+        self.gs = self.cfg.grid_size
+        self.max_steps = self.cfg.max_steps_per_episode
+        self._arange = np.arange(self.n)
+        self._all_cells = np.arange(self.gs * self.gs)
+
+        self.head_r = np.zeros(self.n, dtype=np.int32)
+        self.head_c = np.zeros(self.n, dtype=np.int32)
+        self.direction = np.zeros(self.n, dtype=np.int32)
+        self.body_grid = np.zeros((self.n, self.gs, self.gs), dtype=np.int32)
+        self.length = np.ones(self.n, dtype=np.int32)
+        self.score = np.zeros(self.n, dtype=np.int32)
+        self.steps_alive = np.zeros(self.n, dtype=np.int32)
+        self.alive = np.ones(self.n, dtype=bool)
+        self.food_r = np.zeros(self.n, dtype=np.int32)
+        self.food_c = np.zeros(self.n, dtype=np.int32)
+
+    def reset_all(self) -> np.ndarray:
+        """Reset every env. Returns states (N, C, H, W)."""
+        mid = self.gs // 2
+        self.head_r = np.full(self.n, mid, dtype=np.int32)
+        self.head_c = np.full(self.n, mid, dtype=np.int32)
+        self.direction = np.full(self.n, RIGHT, dtype=np.int32)
+
+        self.body_grid = np.zeros((self.n, self.gs, self.gs), dtype=np.int32)
+        self.body_grid[self._arange, self.head_r, self.head_c] = 1
+
+        self.length = np.ones(self.n, dtype=np.int32)
+        self.score = np.zeros(self.n, dtype=np.int32)
+        self.steps_alive = np.zeros(self.n, dtype=np.int32)
+        self.alive = np.ones(self.n, dtype=bool)
+
+        self.food_r = np.zeros(self.n, dtype=np.int32)
+        self.food_c = np.zeros(self.n, dtype=np.int32)
+        self._place_food_batch(self._arange)
+
+        return self._get_states()
+
+    def step(
+        self, actions: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, np.ndarray]]:
+        """Step all N envs. Dead envs auto-reset after returning terminal info."""
+
+        # Prevent the snake from reversing into its own neck
+        reverse_mask = (self.length > 1) & (actions == _OPPOSITE[self.direction])
+        actions = np.where(reverse_mask, self.direction, actions)
+        self.direction = actions
+
+        new_r = self.head_r + _DR[actions]
+        new_c = self.head_c + _DC[actions]
+
+        wall_hit = (new_r < 0) | (new_r >= self.gs) | (new_c < 0) | (new_c >= self.gs)
+
+        # Clamp out-of-bounds coords so we can safely index body_grid (wall_hit already flagged)
+        safe_r = np.clip(new_r, 0, self.gs - 1)
+        safe_c = np.clip(new_c, 0, self.gs - 1)
+        self_hit = self.body_grid[self._arange, safe_r, safe_c] > 0
+
+        died = wall_hit | self_hit
+
+        # Decay body: each cell counts down to 0, at which point the segment vanishes
+        nonzero = self.body_grid > 0
+        self.body_grid[nonzero] -= 1
+
+        ate_food = (~died) & (new_r == self.food_r) & (new_c == self.food_c)
+
+        live = ~died
+        self.head_r = np.where(live, new_r, self.head_r)
+        self.head_c = np.where(live, new_c, self.head_c)
+
+        self.length[ate_food] += 1
+        self.score[ate_food] += 1
+
+        # New head gets lifetime = current length (will count down to 0 as the tail passes)
+        self.body_grid[self._arange[live], self.head_r[live], self.head_c[live]] = (
+            self.length[live]
+        )
+
+        self.steps_alive[live] += 1
+
+        timed_out = live & (self.steps_alive >= self.max_steps)
+        died = died | timed_out
+
+        rewards = np.full(self.n, self.cfg.step_penalty, dtype=np.float32)
+        rewards[ate_food] = self.cfg.food_reward
+        rewards[died & ~timed_out] = self.cfg.death_penalty
+
+        dones = died.copy()
+
+        # Snapshot before auto-reset so callers see terminal episode stats
+        infos: dict[str, np.ndarray] = {
+            "length": self.length.copy(),
+            "steps_alive": self.steps_alive.copy(),
+        }
+
+        states = self._get_states()
+
+        ate_idx = np.where(ate_food)[0]
+        if ate_idx.size > 0:
+            self._place_food_batch(ate_idx)
+
+        dead_idx = np.where(died)[0]
+        if dead_idx.size > 0:
+            self._reset_envs(dead_idx)
+
+        return states, rewards, dones, infos
+
+    def _get_states(self) -> np.ndarray:
+        """Build (N, 4, gs, gs) float32 state tensor from internal grids."""
+        states = np.zeros(
+            (self.n, self.cfg.num_channels, self.gs, self.gs), dtype=np.float32
+        )
+
+        states[self._arange, 0, self.head_r, self.head_c] = 1.0
+
+        # Body gradient: higher countdown (closer to head) maps to higher values.
+        # This lets the model distinguish the neck from the tail.
+        body_mask = self.body_grid > 0
+        head_mask = np.zeros_like(body_mask)
+        head_mask[self._arange, self.head_r, self.head_c] = True
+        body_only = body_mask & ~head_mask
+
+        lengths_3d = self.length[:, None, None].astype(np.float32)
+        timer_vals = self.body_grid.astype(np.float32)
+        gradient = np.where(lengths_3d > 1, 0.5 + 0.5 * timer_vals / lengths_3d, 1.0)
+        states[:, 1] = np.where(body_only, gradient, 0.0)
+
+        states[self._arange, 2, self.food_r, self.food_c] = 1.0
+        states[self._arange, 3, self.head_r, self.head_c] = _DIR_VAL[self.direction]
+
+        return states
+
+    def _reset_envs(self, idx: np.ndarray) -> None:
+        """Reset a subset of envs by index (called automatically on death)."""
+        mid = self.gs // 2
+        self.head_r[idx] = mid
+        self.head_c[idx] = mid
+        self.direction[idx] = RIGHT
+        self.body_grid[idx] = 0
+        self.body_grid[idx, mid, mid] = 1
+        self.length[idx] = 1
+        self.score[idx] = 0
+        self.steps_alive[idx] = 0
+        self.alive[idx] = True
+        self._place_food_batch(idx)
+
+    def _place_food_batch(self, idx: np.ndarray) -> None:
+        """Place food on a random empty cell for each env in *idx*."""
+        for i in idx:
+            occupied = self.body_grid[i] > 0
+            free_mask = ~occupied.ravel()
+            free_cells = self._all_cells[free_mask]
+            if free_cells.size == 0:
+                self.food_r[i] = 0
+                self.food_c[i] = 0
+                continue
+            chosen = np.random.choice(free_cells)
+            self.food_r[i] = chosen // self.gs
+            self.food_c[i] = chosen % self.gs

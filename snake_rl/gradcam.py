@@ -1,8 +1,7 @@
 """Grad-CAM for a DQN model.
 
-Computes a class-discriminative saliency heatmap by weighting the activations of
-a target convolutional layer by the gradient of the chosen action's Q-value with
-respect to those activations.
+Computes a saliency heatmap by weighting the activations of a target conv layer
+by the gradient of the chosen action's Q-value w.r.t. those activations.
 """
 
 from __future__ import annotations
@@ -21,23 +20,8 @@ def compute_gradcam(
 ) -> np.ndarray:
     """Return a 2-D heatmap (H, W) in [0, 1] for the given action.
 
-    Parameters
-    ----------
-    model : nn.Module
-        The DQN (must have a layer named *target_layer_name*).
-    state : np.ndarray
-        Single-sample state array of shape (C, H, W).
-    action_index : int
-        Index of the action whose Q-value drives the gradient.
-    target_layer_name : str
-        Name of the Conv2d layer to extract activations/gradients from.
-    device : torch.device | str
-        Device to run the forward/backward pass on.
-
-    Returns
-    -------
-    np.ndarray
-        Heatmap of shape (H, W) with values in [0, 1].
+    Hooks capture activations and gradients on the target layer during a
+    forward+backward pass, then combines them into a spatial attention map.
     """
     model.eval()
     target_layer: nn.Module = getattr(model, target_layer_name)
@@ -53,8 +37,8 @@ def compute_gradcam(
     )
 
     try:
+        # Gradients flow through activations (via hooks), not through the input
         inp = torch.from_numpy(state).unsqueeze(0).to(device).requires_grad_(False)
-        # We need gradients w.r.t. the activations, not the input
         q_values = model(inp)
         score = q_values[0, action_index]
 
@@ -64,10 +48,8 @@ def compute_gradcam(
         act = activations[0].detach()   # (1, C, H, W)
         grad = gradients[0].detach()    # (1, C, H, W)
 
-        # Channel-wise global-average-pooled gradient -> weights
+        # Global-average-pool the gradient per channel, then weight activations
         weights = grad.mean(dim=(2, 3), keepdim=True)  # (1, C, 1, 1)
-
-        # Weighted combination of activations
         cam = (weights * act).sum(dim=1, keepdim=True)  # (1, 1, H, W)
         cam = torch.relu(cam).squeeze()                 # (H, W)
 
