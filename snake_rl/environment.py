@@ -208,9 +208,9 @@ class VecSnakeEnv:
         terminated = wall_hit | self_hit
         died = terminated.copy()
 
-        # Decay body: each cell counts down to 0, at which point the segment vanishes
-        nonzero = self.body_grid > 0
-        self.body_grid[nonzero] -= 1
+        # Decay body timers: contiguous subtract + clip is faster than masked scatter
+        self.body_grid -= 1
+        np.maximum(self.body_grid, 0, out=self.body_grid)
 
         ate_food = (~died) & (self.food_r >= 0) & (new_r == self.food_r) & (new_c == self.food_c)
 
@@ -299,15 +299,24 @@ class VecSnakeEnv:
         self._place_food_batch(idx)
 
     def _place_food_batch(self, idx: np.ndarray) -> None:
-        """Place food on a random empty cell for each env in *idx*."""
-        for i in idx:
-            occupied = self.body_grid[i] > 0
-            free_mask = ~occupied.ravel()
-            free_cells = self._all_cells[free_mask]
-            if free_cells.size == 0:
-                self.food_r[i] = -1
-                self.food_c[i] = -1
-                continue
-            chosen = np.random.choice(free_cells)
-            self.food_r[i] = chosen // self.gs
-            self.food_c[i] = chosen % self.gs
+        """Place food on a random empty cell for each env in *idx*.
+
+        Uses rejection sampling: draw a random cell, accept if unoccupied.
+        For typical snake lengths (≪ grid area) this converges in 1–2 rounds.
+        """
+        remaining = idx
+        for _ in range(100):
+            if remaining.size == 0:
+                return
+            flat = np.random.randint(0, self.gs * self.gs, size=remaining.size)
+            r, c = flat // self.gs, flat % self.gs
+            free = self.body_grid[remaining, r, c] == 0
+
+            accepted = remaining[free]
+            self.food_r[accepted] = r[free]
+            self.food_c[accepted] = c[free]
+            remaining = remaining[~free]
+
+        # Remaining envs have near-full grids — no valid food position
+        self.food_r[remaining] = -1
+        self.food_c[remaining] = -1

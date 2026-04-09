@@ -71,19 +71,19 @@ class Trainer:
         rewards: torch.Tensor,
         next_states: torch.Tensor,
         terminated: torch.Tensor,
-    ) -> torch.Tensor:
-        q_values = self.policy_net(states).gather(1, actions.unsqueeze(1)).squeeze(1)
+    ) -> tuple[torch.Tensor, float]:
+        all_q = self.policy_net(states)
+        q_values = all_q.gather(1, actions.unsqueeze(1)).squeeze(1)
 
         with torch.no_grad():
             # Double DQN: policy_net selects the action, target_net evaluates it.
-            # This decouples selection from evaluation and reduces Q overestimation.
             next_actions = self.policy_net(next_states).argmax(dim=1, keepdim=True)
             next_q = self.target_net(next_states).gather(1, next_actions).squeeze(1)
-            # Only collision-terminated transitions have no future value.
-            # Timeout-truncated transitions still bootstrap (terminated=0).
             target = rewards + self.cfg.gamma * next_q * (1.0 - terminated)
 
-        return nn.functional.smooth_l1_loss(q_values, target)
+        loss = nn.functional.smooth_l1_loss(q_values, target)
+        mean_q = all_q.detach().max(dim=1).values.mean().item()
+        return loss, mean_q
 
     def train(self) -> None:
         cfg = self.cfg
@@ -153,15 +153,14 @@ class Trainer:
 
             if len(self.buffer) >= cfg.min_buffer:
                 batch = self.buffer.sample(cfg.batch_size, self.device)
-                loss = self._compute_loss(*batch)
+                loss, mean_q = self._compute_loss(*batch)
                 self.optimizer.zero_grad()
                 loss.backward()
                 nn.utils.clip_grad_norm_(self.policy_net.parameters(), 10.0)
                 self.optimizer.step()
 
                 loss_accum += loss.item()
-                with torch.no_grad():
-                    q_accum += self.policy_net(batch[0]).max(dim=1).values.mean().item()
+                q_accum += mean_q
                 learn_count += 1
 
             # target_update_freq is in gradient steps; scale to transitions.
