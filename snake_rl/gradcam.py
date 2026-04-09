@@ -15,7 +15,7 @@ def compute_gradcam(
     model: nn.Module,
     state: np.ndarray,
     action_index: int,
-    target_layer_name: str = "conv3",
+    target_layer_name: str = "conv6",
     device: torch.device | str = "cpu",
 ) -> np.ndarray:
     """Return a 2-D heatmap (H, W) in [0, 1] for the given action.
