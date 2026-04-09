@@ -11,7 +11,7 @@ from snake_rl.trainer import Trainer
 
 def parse_args() -> Config:
     parser = argparse.ArgumentParser(description="Train a DQN agent to play Snake")
-    parser.add_argument("--grid-size", type=int, default=64)
+    parser.add_argument("--grid-size", type=int, default=32)
     parser.add_argument("--total-steps", type=int, default=1_000_000)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=1e-4)

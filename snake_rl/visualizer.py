@@ -8,9 +8,10 @@ import matplotlib
 matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
-import matplotlib.cm as cm
+import matplotlib.colors as mcolors
 import numpy as np
 import imageio.v3 as iio
+from scipy.ndimage import gaussian_filter
 
 ACTION_NAMES = ["Up", "Down", "Left", "Right"]
 CELL_PX = 30
@@ -20,6 +21,12 @@ _HEAD = np.array([0, 200, 80], dtype=np.uint8)
 _BODY = np.array([0, 150, 60], dtype=np.uint8)
 _FOOD = np.array([220, 50, 50], dtype=np.uint8)
 _GRID_LINE = np.array([55, 55, 55], dtype=np.uint8)
+
+# Classic thermal heatmap: dark blue → cyan → green → yellow → red
+_HEATMAP_CMAP = mcolors.LinearSegmentedColormap.from_list(
+    "thermal",
+    [(0, 0, 0.3), (0, 0, 1), (0, 1, 1), (0, 1, 0), (1, 1, 0), (1, 0, 0)],
+)
 
 
 def render_board(state: np.ndarray, grid_size: int) -> np.ndarray:
@@ -54,16 +61,26 @@ def render_board(state: np.ndarray, grid_size: int) -> np.ndarray:
 
 
 def overlay_heatmap(
-    board_img: np.ndarray, heatmap: np.ndarray, alpha: float = 0.45
+    board_img: np.ndarray, heatmap: np.ndarray, alpha: float = 0.45, sigma: float = 1.2
 ) -> np.ndarray:
-    """Alpha-blend a Grad-CAM heatmap (jet colourmap) onto the board image."""
+    """Alpha-blend a smoothed Grad-CAM heatmap onto the board image.
+
+    A gaussian blur softens the cell boundaries so the heatmap looks continuous
+    rather than blocky. sigma controls the smoothing radius in grid-cell units
+    (applied before upscaling to pixel resolution).
+    """
     h, w, _ = board_img.shape
-    # Nearest-neighbour upscale so each cell gets a uniform colour
-    hm_large = np.kron(heatmap, np.ones((CELL_PX, CELL_PX)))
+
+    smoothed = gaussian_filter(heatmap.astype(np.float64), sigma=sigma)
+    # Re-normalize after smoothing since the blur can reduce the peak
+    smax = smoothed.max()
+    if smax > 0:
+        smoothed /= smax
+
+    hm_large = np.kron(smoothed, np.ones((CELL_PX, CELL_PX)))
     hm_large = hm_large[:h, :w]
 
-    colour_map = cm.get_cmap("jet")
-    hm_rgb = (colour_map(hm_large)[:, :, :3] * 255).astype(np.uint8)
+    hm_rgb = (_HEATMAP_CMAP(hm_large)[:, :, :3] * 255).astype(np.uint8)
 
     blended = (
         (1 - alpha) * board_img.astype(np.float32)

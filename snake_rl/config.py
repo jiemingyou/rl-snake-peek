@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 
 @dataclass
 class Config:
-    grid_size: int = 64
+    grid_size: int = 32
     num_channels: int = 4  # head, body, food, direction
 
     lr: float = 1e-4
