@@ -164,8 +164,9 @@ class Trainer:
                     q_accum += self.policy_net(batch[0]).max(dim=1).values.mean().item()
                 learn_count += 1
 
-            # Use < n because total_transitions jumps by n each iteration
-            if total_transitions % cfg.target_update_freq < n:
+            # target_update_freq is in gradient steps; scale to transitions.
+            target_freq_transitions = cfg.target_update_freq * n
+            if total_transitions % target_freq_transitions < n:
                 self.target_net.load_state_dict(self.policy_net.state_dict())
 
             self.scheduler.step()

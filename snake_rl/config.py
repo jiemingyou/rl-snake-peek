@@ -12,7 +12,7 @@ class Config:
     lr_end: float = 1e-5  # final LR after full linear decay over total_steps
     gamma: float = 0.99
     batch_size: int = 64
-    target_update_freq: int = 1000
+    target_update_freq: int = 1000  # in gradient steps, converted to transitions internally
     num_actions: int = 4
 
     eps_start: float = 1.0
