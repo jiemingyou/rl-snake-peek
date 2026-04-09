@@ -3,10 +3,13 @@ from dataclasses import dataclass, field
 
 @dataclass
 class Config:
+    seed: int = 42
+
     grid_size: int = 32
     num_channels: int = 4  # head, body, food, direction
 
     lr: float = 1e-4
+    lr_end: float = 1e-5  # final LR after full linear decay over total_steps
     gamma: float = 0.99
     batch_size: int = 64
     target_update_freq: int = 1000

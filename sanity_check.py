@@ -15,11 +15,13 @@ import argparse
 
 import numpy as np
 import torch
+import torch.nn as nn
 
 from snake_rl.config import Config
 from snake_rl.environment import SnakeEnv
 from snake_rl.gradcam import compute_gradcam
-from snake_rl.model import DQN
+from snake_rl.model import build_dqn_for_state_dict
+from snake_rl.seeding import set_global_seed
 
 
 def mask_top_k(state: np.ndarray, heatmap: np.ndarray, k: int) -> np.ndarray:
@@ -35,14 +37,18 @@ def run_check(
     checkpoint_path: str,
     num_states: int = 200,
     top_k: int = 5,
+    seed: int = 42,
 ) -> None:
+    set_global_seed(seed, deterministic_torch=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     cfg: Config = ckpt["config"]
-    model = DQN(cfg).to(device)
-    model.load_state_dict(ckpt["model_state_dict"])
+    state_dict = ckpt["model_state_dict"]
+    model: nn.Module = build_dqn_for_state_dict(cfg, state_dict).to(device)
+    model.load_state_dict(state_dict)
     model.eval()
+    target_layer_name = "conv6" if hasattr(model, "conv6") else "conv3"
 
     env = SnakeEnv(cfg)
 
@@ -59,7 +65,13 @@ def run_check(
             q_orig = model(inp).squeeze(0).cpu().numpy()
         action_orig = int(np.argmax(q_orig))
 
-        heatmap = compute_gradcam(model, state, action_orig, device=device)
+        heatmap = compute_gradcam(
+            model,
+            state,
+            action_orig,
+            target_layer_name=target_layer_name,
+            device=device,
+        )
 
         masked = mask_top_k(state, heatmap, k=top_k)
         with torch.no_grad():
@@ -89,9 +101,10 @@ def main() -> None:
     parser.add_argument("--checkpoint", type=str, required=True)
     parser.add_argument("--num-states", type=int, default=200)
     parser.add_argument("--top-k", type=int, default=5)
+    parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
-    run_check(args.checkpoint, args.num_states, args.top_k)
+    run_check(args.checkpoint, args.num_states, args.top_k, args.seed)
 
 
 if __name__ == "__main__":

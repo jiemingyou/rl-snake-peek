@@ -24,7 +24,8 @@ class ReplayBuffer:
         self.actions = np.zeros(cap, dtype=np.int64)
         self.rewards = np.zeros(cap, dtype=np.float32)
         self.next_states = np.zeros((cap, nc, gs, gs), dtype=np.float32)
-        self.dones = np.zeros(cap, dtype=np.float32)
+        # True for collision deaths only; timeouts (truncation) stay False to allow bootstrapping.
+        self.terminated = np.zeros(cap, dtype=np.float32)
 
         # Pre-allocated pinned tensors avoid a page-lock on every sample() call.
         # Data is copied into these, then transferred to GPU with non_blocking=True.
@@ -34,7 +35,7 @@ class ReplayBuffer:
         self._pin_next_states = torch.zeros(bs, nc, gs, gs, pin_memory=use_pin)
         self._pin_actions = torch.zeros(bs, dtype=torch.int64, pin_memory=use_pin)
         self._pin_rewards = torch.zeros(bs, pin_memory=use_pin)
-        self._pin_dones = torch.zeros(bs, pin_memory=use_pin)
+        self._pin_terminated = torch.zeros(bs, pin_memory=use_pin)
 
     def push(
         self,
@@ -42,14 +43,14 @@ class ReplayBuffer:
         action: int,
         reward: float,
         next_state: np.ndarray,
-        done: bool,
+        terminated: bool,
     ) -> None:
         i = self.pos
         self.states[i] = state
         self.actions[i] = action
         self.rewards[i] = reward
         self.next_states[i] = next_state
-        self.dones[i] = float(done)
+        self.terminated[i] = float(terminated)
 
         self.pos = (self.pos + 1) % self.capacity
         self.size = min(self.size + 1, self.capacity)
@@ -60,7 +61,7 @@ class ReplayBuffer:
         actions: np.ndarray,
         rewards: np.ndarray,
         next_states: np.ndarray,
-        dones: np.ndarray,
+        terminated: np.ndarray,
     ) -> None:
         """Insert N transitions at once. Arrays have leading dim N."""
         n = states.shape[0]
@@ -70,21 +71,21 @@ class ReplayBuffer:
             self.actions[s] = actions
             self.rewards[s] = rewards
             self.next_states[s] = next_states
-            self.dones[s] = dones
+            self.terminated[s] = terminated
         else:
             first = self.capacity - self.pos
             self.states[self.pos :] = states[:first]
             self.actions[self.pos :] = actions[:first]
             self.rewards[self.pos :] = rewards[:first]
             self.next_states[self.pos :] = next_states[:first]
-            self.dones[self.pos :] = dones[:first]
+            self.terminated[self.pos :] = terminated[:first]
 
             rest = n - first
             self.states[:rest] = states[first:]
             self.actions[:rest] = actions[first:]
             self.rewards[:rest] = rewards[first:]
             self.next_states[:rest] = next_states[first:]
-            self.dones[:rest] = dones[first:]
+            self.terminated[:rest] = terminated[first:]
 
         self.pos = (self.pos + n) % self.capacity
         self.size = min(self.size + n, self.capacity)
@@ -100,7 +101,7 @@ class ReplayBuffer:
         self._pin_next_states.copy_(torch.from_numpy(self.next_states[indices]))
         self._pin_actions.copy_(torch.from_numpy(self.actions[indices]))
         self._pin_rewards.copy_(torch.from_numpy(self.rewards[indices]))
-        self._pin_dones.copy_(torch.from_numpy(self.dones[indices]))
+        self._pin_terminated.copy_(torch.from_numpy(self.terminated[indices]))
 
         nb = dev.type == "cuda"
         return (
@@ -108,7 +109,7 @@ class ReplayBuffer:
             self._pin_actions.to(dev, non_blocking=nb),
             self._pin_rewards.to(dev, non_blocking=nb),
             self._pin_next_states.to(dev, non_blocking=nb),
-            self._pin_dones.to(dev, non_blocking=nb),
+            self._pin_terminated.to(dev, non_blocking=nb),
         )
 
     def __len__(self) -> int:

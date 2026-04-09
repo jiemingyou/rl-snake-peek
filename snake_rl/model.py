@@ -48,3 +48,38 @@ class DQN(nn.Module):
         x = x.flatten(start_dim=1)
         x = self.relu(self.fc1(x))
         return self.fc2(x)
+
+
+class LegacyDQN(nn.Module):
+    """Backward-compatible 3-conv DQN used by older checkpoints."""
+
+    def __init__(self, config: Config | None = None):
+        super().__init__()
+        cfg = config or Config()
+
+        self.conv1 = nn.Conv2d(cfg.num_channels, 32, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
+        self.conv3 = nn.Conv2d(64, 64, kernel_size=3, padding=1)
+
+        self.pool = nn.AdaptiveAvgPool2d(POOL_SIZE)
+        self.fc1 = nn.Linear(64 * POOL_SIZE * POOL_SIZE, 512)
+        self.fc2 = nn.Linear(512, cfg.num_actions)
+        self.relu = nn.ReLU()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.relu(self.conv1(x))
+        x = self.relu(self.conv2(x))
+        x = self.relu(self.conv3(x))
+        x = self.pool(x)
+        x = x.flatten(start_dim=1)
+        x = self.relu(self.fc1(x))
+        return self.fc2(x)
+
+
+def build_dqn_for_state_dict(config: Config, state_dict: dict[str, torch.Tensor]) -> nn.Module:
+    """Instantiate a DQN architecture compatible with a checkpoint state_dict."""
+    if "conv6.weight" in state_dict:
+        return DQN(config)
+    if "conv3.weight" in state_dict and "conv4.weight" not in state_dict:
+        return LegacyDQN(config)
+    raise ValueError("Unsupported checkpoint architecture: cannot infer model variant.")

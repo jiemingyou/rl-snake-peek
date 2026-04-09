@@ -16,6 +16,7 @@ from snake_rl.config import Config
 from snake_rl.model import DQN
 from snake_rl.replay_buffer import ReplayBuffer
 from snake_rl.environment import VecSnakeEnv
+from snake_rl.seeding import set_global_seed
 
 
 class Trainer:
@@ -23,6 +24,7 @@ class Trainer:
 
     def __init__(self, config: Config | None = None):
         self.cfg = config or Config()
+        set_global_seed(self.cfg.seed, deterministic_torch=True)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         self.vec_env = VecSnakeEnv(self.cfg)
@@ -32,6 +34,12 @@ class Trainer:
         self.target_net.eval()
 
         self.optimizer = optim.Adam(self.policy_net.parameters(), lr=self.cfg.lr)
+        self.scheduler = torch.optim.lr_scheduler.LinearLR(
+            self.optimizer,
+            start_factor=1.0,
+            end_factor=self.cfg.lr_end / self.cfg.lr,
+            total_iters=self.cfg.total_steps // self.cfg.num_envs,
+        )
         self.buffer = ReplayBuffer(self.cfg, device=self.device)
 
         os.makedirs(self.cfg.checkpoint_dir, exist_ok=True)
@@ -62,13 +70,18 @@ class Trainer:
         actions: torch.Tensor,
         rewards: torch.Tensor,
         next_states: torch.Tensor,
-        dones: torch.Tensor,
+        terminated: torch.Tensor,
     ) -> torch.Tensor:
         q_values = self.policy_net(states).gather(1, actions.unsqueeze(1)).squeeze(1)
 
         with torch.no_grad():
-            next_q = self.target_net(next_states).max(dim=1).values
-            target = rewards + self.cfg.gamma * next_q * (1.0 - dones)
+            # Double DQN: policy_net selects the action, target_net evaluates it.
+            # This decouples selection from evaluation and reduces Q overestimation.
+            next_actions = self.policy_net(next_states).argmax(dim=1, keepdim=True)
+            next_q = self.target_net(next_states).gather(1, next_actions).squeeze(1)
+            # Only collision-terminated transitions have no future value.
+            # Timeout-truncated transitions still bootstrap (terminated=0).
+            target = rewards + self.cfg.gamma * next_q * (1.0 - terminated)
 
         return nn.functional.smooth_l1_loss(q_values, target)
 
@@ -88,7 +101,7 @@ class Trainer:
         learn_count = 0
 
         log_path = Path(cfg.log_file)
-        log_file = open(log_path, "w", newline="")
+        log_file = open(log_path, "w", newline="", encoding="utf-8")
         writer = csv.writer(log_file)
         writer.writerow(
             [
@@ -117,7 +130,7 @@ class Trainer:
                 actions.astype(np.int64),
                 rewards,
                 next_states,
-                dones.astype(np.float32),
+                infos["terminated"].astype(np.float32),
             )
 
             ep_rewards += rewards
@@ -155,6 +168,7 @@ class Trainer:
             if total_transitions % cfg.target_update_freq < n:
                 self.target_net.load_state_dict(self.policy_net.state_dict())
 
+            self.scheduler.step()
             pbar.update(n)
 
             if total_transitions % cfg.log_every < n and recent_rewards:
@@ -184,6 +198,7 @@ class Trainer:
                 self.tb.add_scalar("train/loss", mean_loss, total_transitions)
                 self.tb.add_scalar("train/mean_q", mean_q, total_transitions)
                 self.tb.add_scalar("train/epsilon", eps, total_transitions)
+                self.tb.add_scalar("train/lr", self.scheduler.get_last_lr()[0], total_transitions)
 
                 pbar.set_postfix(
                     eps=f"{eps:.3f}",

@@ -6,7 +6,7 @@ A CNN-based DQN learns to play Snake. Grad-CAM heatmaps reveal what the agent fo
 
 ```bash
 uv sync                        # install deps (requires Python 3.12+, uv)
-uv run python train.py         # train (~30-60 min for 500k steps on CPU)
+uv run python train.py --seed 42  # train (~30-60 min for 500k steps on CPU)
 uv run tensorboard --logdir runs  # monitor live in another terminal
 ```
 
@@ -14,15 +14,15 @@ uv run tensorboard --logdir runs  # monitor live in another terminal
 
 ```bash
 # single checkpoint
-uv run python evaluate.py --checkpoint checkpoints/step_500000.pt --episodes 3 --output eval.mp4
+uv run python evaluate.py --checkpoint checkpoints/step_500000.pt --episodes 3 --seed 42 --output eval.mp4
 
 # compare early / mid / late training
 uv run python evaluate.py \
     --checkpoints checkpoints/step_50000.pt checkpoints/step_250000.pt checkpoints/step_500000.pt \
-    --episodes 1 --output comparison.mp4
+    --episodes 1 --seed 42 --output comparison.mp4
 
 # sanity check: mask salient cells, measure Q-value shift
-uv run python sanity_check.py --checkpoint checkpoints/step_500000.pt
+uv run python sanity_check.py --checkpoint checkpoints/step_500000.pt --seed 42
 ```
 
 Each video frame shows the game board, Grad-CAM overlay, and a Q-value panel side-by-side.
@@ -36,16 +36,17 @@ sanity_check.py       Entry point: interpretability validation
 snake_rl/
   config.py           Hyperparameters (single dataclass)
   environment.py      Snake game, multi-channel grid state
-  model.py            3-conv-layer DQN (no pooling = native Grad-CAM resolution)
+  model.py            6-conv-layer DQN (full-res features for Grad-CAM)
   replay_buffer.py    Circular replay buffer
   trainer.py          DQN training loop + TensorBoard + CSV logging
   gradcam.py          Grad-CAM on last conv layer
+  seeding.py          RNG seeding helpers (python/numpy/torch)
   visualizer.py       Board rendering, heatmap overlay, video export
 ```
 
 ## State Channels
 
-`(4, 12, 12)` float32 tensor: **head** | **body** (gradient neck-to-tail) | **food** | **direction**
+`(4, grid_size, grid_size)` float32 tensor: **head** | **body** (gradient neck-to-tail) | **food** | **direction**
 
 ## CLI Overrides
 

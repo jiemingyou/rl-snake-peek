@@ -46,6 +46,7 @@ class SnakeEnv:
         self.done = False
         self.steps_alive = 0
         self.score = 0
+        self._terminated = False  # True only for wall/self-collision, False for timeout
         return self._get_state()
 
     def step(self, action: int) -> tuple[np.ndarray, float, bool, dict[str, Any]]:
@@ -63,10 +64,12 @@ class SnakeEnv:
         r, c = new_head
         if r < 0 or r >= self.grid_size or c < 0 or c >= self.grid_size:
             self.done = True
+            self._terminated = True
             return self._get_state(), self.cfg.death_penalty, True, self._info()
 
         if new_head in self.snake:
             self.done = True
+            self._terminated = True
             return self._get_state(), self.cfg.death_penalty, True, self._info()
 
         self.snake.appendleft(new_head)
@@ -125,7 +128,11 @@ class SnakeEnv:
         return random.choice(free)
 
     def _info(self) -> dict[str, Any]:
-        return {"length": len(self.snake), "steps_alive": self.steps_alive}
+        return {
+            "length": len(self.snake),
+            "steps_alive": self.steps_alive,
+            "terminated": self._terminated,
+        }
 
 
 class VecSnakeEnv:
@@ -153,8 +160,8 @@ class VecSnakeEnv:
         self.score = np.zeros(self.n, dtype=np.int32)
         self.steps_alive = np.zeros(self.n, dtype=np.int32)
         self.alive = np.ones(self.n, dtype=bool)
-        self.food_r = np.zeros(self.n, dtype=np.int32)
-        self.food_c = np.zeros(self.n, dtype=np.int32)
+        self.food_r = np.full(self.n, -1, dtype=np.int32)
+        self.food_c = np.full(self.n, -1, dtype=np.int32)
 
     def reset_all(self) -> np.ndarray:
         """Reset every env. Returns states (N, C, H, W)."""
@@ -171,8 +178,8 @@ class VecSnakeEnv:
         self.steps_alive = np.zeros(self.n, dtype=np.int32)
         self.alive = np.ones(self.n, dtype=bool)
 
-        self.food_r = np.zeros(self.n, dtype=np.int32)
-        self.food_c = np.zeros(self.n, dtype=np.int32)
+        self.food_r = np.full(self.n, -1, dtype=np.int32)
+        self.food_c = np.full(self.n, -1, dtype=np.int32)
         self._place_food_batch(self._arange)
 
         return self._get_states()
@@ -197,13 +204,15 @@ class VecSnakeEnv:
         safe_c = np.clip(new_c, 0, self.gs - 1)
         self_hit = self.body_grid[self._arange, safe_r, safe_c] > 0
 
-        died = wall_hit | self_hit
+        # terminated = true collision death (wall or self); excludes timeout truncation
+        terminated = wall_hit | self_hit
+        died = terminated.copy()
 
         # Decay body: each cell counts down to 0, at which point the segment vanishes
         nonzero = self.body_grid > 0
         self.body_grid[nonzero] -= 1
 
-        ate_food = (~died) & (new_r == self.food_r) & (new_c == self.food_c)
+        ate_food = (~died) & (self.food_r >= 0) & (new_r == self.food_r) & (new_c == self.food_c)
 
         live = ~died
         self.head_r = np.where(live, new_r, self.head_r)
@@ -224,7 +233,7 @@ class VecSnakeEnv:
 
         rewards = np.full(self.n, self.cfg.step_penalty, dtype=np.float32)
         rewards[ate_food] = self.cfg.food_reward
-        rewards[died & ~timed_out] = self.cfg.death_penalty
+        rewards[terminated] = self.cfg.death_penalty
 
         dones = died.copy()
 
@@ -232,9 +241,8 @@ class VecSnakeEnv:
         infos: dict[str, np.ndarray] = {
             "length": self.length.copy(),
             "steps_alive": self.steps_alive.copy(),
+            "terminated": terminated.copy(),
         }
-
-        states = self._get_states()
 
         ate_idx = np.where(ate_food)[0]
         if ate_idx.size > 0:
@@ -243,6 +251,8 @@ class VecSnakeEnv:
         dead_idx = np.where(died)[0]
         if dead_idx.size > 0:
             self._reset_envs(dead_idx)
+
+        states = self._get_states()
 
         return states, rewards, dones, infos
 
@@ -266,7 +276,10 @@ class VecSnakeEnv:
         gradient = np.where(lengths_3d > 1, 0.5 + 0.5 * timer_vals / lengths_3d, 1.0)
         states[:, 1] = np.where(body_only, gradient, 0.0)
 
-        states[self._arange, 2, self.food_r, self.food_c] = 1.0
+        valid_food = self.food_r >= 0
+        if valid_food.any():
+            idx = self._arange[valid_food]
+            states[idx, 2, self.food_r[valid_food], self.food_c[valid_food]] = 1.0
         states[self._arange, 3, self.head_r, self.head_c] = _DIR_VAL[self.direction]
 
         return states
@@ -292,8 +305,8 @@ class VecSnakeEnv:
             free_mask = ~occupied.ravel()
             free_cells = self._all_cells[free_mask]
             if free_cells.size == 0:
-                self.food_r[i] = 0
-                self.food_c[i] = 0
+                self.food_r[i] = -1
+                self.food_c[i] = -1
                 continue
             chosen = np.random.choice(free_cells)
             self.food_r[i] = chosen // self.gs

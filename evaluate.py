@@ -4,15 +4,16 @@
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
 
 import numpy as np
 import torch
+import torch.nn as nn
 
 from snake_rl.config import Config
 from snake_rl.environment import SnakeEnv
 from snake_rl.gradcam import compute_gradcam
-from snake_rl.model import DQN
+from snake_rl.model import build_dqn_for_state_dict
+from snake_rl.seeding import set_global_seed
 from snake_rl.visualizer import (
     compose_frame,
     overlay_heatmap,
@@ -23,18 +24,19 @@ from snake_rl.visualizer import (
 )
 
 
-def load_model(checkpoint_path: str, device: torch.device) -> tuple[DQN, Config]:
+def load_model(checkpoint_path: str, device: torch.device) -> tuple[nn.Module, Config]:
     """Load a DQN model from a checkpoint file."""
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     cfg: Config = ckpt["config"]
-    model = DQN(cfg).to(device)
-    model.load_state_dict(ckpt["model_state_dict"])
+    state_dict = ckpt["model_state_dict"]
+    model = build_dqn_for_state_dict(cfg, state_dict).to(device)
+    model.load_state_dict(state_dict)
     model.eval()
     return model, cfg
 
 
 def run_episode(
-    model: DQN,
+    model: nn.Module,
     cfg: Config,
     device: torch.device,
     episode_num: int = 0,
@@ -45,6 +47,7 @@ def run_episode(
     frames: list[np.ndarray] = []
     board_px = cfg.grid_size * CELL_PX
     step = 0
+    target_layer_name = "conv6" if hasattr(model, "conv6") else "conv3"
 
     while True:
         with torch.no_grad():
@@ -52,7 +55,13 @@ def run_episode(
             q_values = model(inp).squeeze(0).cpu().numpy()
 
         action = int(np.argmax(q_values))
-        heatmap = compute_gradcam(model, state, action, device=device)
+        heatmap = compute_gradcam(
+            model,
+            state,
+            action,
+            target_layer_name=target_layer_name,
+            device=device,
+        )
 
         board_img = render_board(state, cfg.grid_size)
         overlay_img = overlay_heatmap(board_img, heatmap)
@@ -94,8 +103,10 @@ def main() -> None:
     parser.add_argument("--episodes", type=int, default=3)
     parser.add_argument("--output", type=str, default="eval_video.mp4")
     parser.add_argument("--fps", type=int, default=8)
+    parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
+    set_global_seed(args.seed, deterministic_torch=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     checkpoint_paths = args.checkpoints or [args.checkpoint]
@@ -103,6 +114,8 @@ def main() -> None:
     all_frames: list[np.ndarray] = []
 
     for ckpt_path in checkpoint_paths:
+        # Re-seed each checkpoint so comparisons are repeatable and order-independent.
+        set_global_seed(args.seed, deterministic_torch=True)
         print(f"\nLoading checkpoint: {ckpt_path}")
         model, cfg = load_model(ckpt_path, device)
 
