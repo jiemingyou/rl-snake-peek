@@ -47,7 +47,16 @@ class SnakeEnv:
         self.steps_alive = 0
         self.score = 0
         self._terminated = False  # True only for wall/self-collision, False for timeout
+        self._prev_potential = self._potential()
         return self._get_state()
+
+    def _potential(self) -> float:
+        """Φ(s) = -manhattan(head, food) / grid_size. Zero when food absent."""
+        if self.food is None:
+            return 0.0
+        hr, hc = self.snake[0]
+        fr, fc = self.food
+        return -(abs(hr - fr) + abs(hc - fc)) / self.grid_size
 
     def step(self, action: int) -> tuple[np.ndarray, float, bool, dict[str, Any]]:
         if self.done:
@@ -81,6 +90,13 @@ class SnakeEnv:
             self.food = self._place_food()
         else:
             self.snake.pop()
+
+        # Potential-based shaping: γ·Φ(s') - Φ(s)
+        new_potential = self._potential()
+        reward += self.cfg.distance_shaping * (
+            self.cfg.gamma * new_potential - self._prev_potential
+        )
+        self._prev_potential = new_potential
 
         self.steps_alive += 1
         if self.steps_alive >= self.max_steps:
@@ -162,6 +178,17 @@ class VecSnakeEnv:
         self.alive = np.ones(self.n, dtype=bool)
         self.food_r = np.full(self.n, -1, dtype=np.int32)
         self.food_c = np.full(self.n, -1, dtype=np.int32)
+        self._prev_potential = np.zeros(self.n, dtype=np.float32)
+
+    def _potentials(self) -> np.ndarray:
+        """Φ(s) = -manhattan(head, food) / gs for each env. Zero when food absent."""
+        valid = self.food_r >= 0
+        pot = np.zeros(self.n, dtype=np.float32)
+        pot[valid] = -(
+            np.abs(self.head_r[valid] - self.food_r[valid])
+            + np.abs(self.head_c[valid] - self.food_c[valid])
+        ).astype(np.float32) / self.gs
+        return pot
 
     def reset_all(self) -> np.ndarray:
         """Reset every env. Returns states (N, C, H, W)."""
@@ -181,6 +208,7 @@ class VecSnakeEnv:
         self.food_r = np.full(self.n, -1, dtype=np.int32)
         self.food_c = np.full(self.n, -1, dtype=np.int32)
         self._place_food_batch(self._arange)
+        self._prev_potential = self._potentials()
 
         return self._get_states()
 
@@ -248,9 +276,27 @@ class VecSnakeEnv:
         if ate_idx.size > 0:
             self._place_food_batch(ate_idx)
 
+        # Potential-based shaping: γ·Φ(s') - Φ(s) for live (non-terminated) envs.
+        # Computed after food placement so Φ(s') reflects the new food position.
+        if self.cfg.distance_shaping:
+            new_potential = self._potentials()
+            shaping = self.cfg.distance_shaping * (
+                self.cfg.gamma * new_potential - self._prev_potential
+            )
+            rewards[live & ~timed_out] += shaping[live & ~timed_out]
+            self._prev_potential = new_potential
+
         dead_idx = np.where(died)[0]
         if dead_idx.size > 0:
             self._reset_envs(dead_idx)
+            # Store the initial potential for newly reset episodes
+            valid = self.food_r[dead_idx] >= 0
+            self._prev_potential[dead_idx] = 0.0
+            di_valid = dead_idx[valid]
+            self._prev_potential[di_valid] = -(
+                np.abs(self.head_r[di_valid] - self.food_r[di_valid])
+                + np.abs(self.head_c[di_valid] - self.food_c[di_valid])
+            ).astype(np.float32) / self.gs
 
         states = self._get_states()
 

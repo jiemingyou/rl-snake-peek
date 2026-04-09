@@ -24,7 +24,8 @@ class Config:
 
     food_reward: float = 1.0
     death_penalty: float = -1.0
-    step_penalty: float = -0.01
+    step_penalty: float = 0.0
+    distance_shaping: float = 1.0  # potential-based shaping scale (0 to disable)
 
     num_envs: int = 32
 

@@ -23,6 +23,7 @@ def parse_args() -> Config:
     parser.add_argument("--buffer-size", type=int, default=50_000)
     parser.add_argument("--min-buffer", type=int, default=10_000)
     parser.add_argument("--target-update-freq", type=int, default=1000)
+    parser.add_argument("--distance-shaping", type=float, default=1.0)
     parser.add_argument("--checkpoint-every", type=int, default=100_000)
     parser.add_argument("--checkpoint-dir", type=str, default="checkpoints")
     parser.add_argument("--log-every", type=int, default=5_000)
@@ -43,6 +44,7 @@ def parse_args() -> Config:
         buffer_size=args.buffer_size,
         min_buffer=args.min_buffer,
         target_update_freq=args.target_update_freq,
+        distance_shaping=args.distance_shaping,
         checkpoint_every=args.checkpoint_every,
         checkpoint_dir=args.checkpoint_dir,
         log_every=args.log_every,
