@@ -32,7 +32,7 @@ class Trainer:
         self.target_net.eval()
 
         self.optimizer = optim.Adam(self.policy_net.parameters(), lr=self.cfg.lr)
-        self.buffer = ReplayBuffer(self.cfg)
+        self.buffer = ReplayBuffer(self.cfg, device=self.device)
 
         os.makedirs(self.cfg.checkpoint_dir, exist_ok=True)
 
