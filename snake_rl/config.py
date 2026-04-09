@@ -14,9 +14,9 @@ class Config:
 
     eps_start: float = 1.0
     eps_end: float = 0.01
-    eps_decay_steps: int = 100_000
+    eps_decay_steps: int = 500_000  # half of total_steps — larger grid needs longer exploration
 
-    buffer_size: int = 100_000
+    buffer_size: int = 50_000  # each 64x64 state is ~64KB; 50K keeps RAM around 6GB
     min_buffer: int = 10_000
 
     food_reward: float = 1.0
@@ -26,8 +26,8 @@ class Config:
     num_envs: int = 32
 
     total_steps: int = 1_000_000
-    checkpoint_every: int = 50_000
-    log_every: int = 1000
+    checkpoint_every: int = 100_000
+    log_every: int = 5_000
     checkpoint_dir: str = "checkpoints"
     log_file: str = "training_log.csv"
     tb_log_dir: str = "runs"
