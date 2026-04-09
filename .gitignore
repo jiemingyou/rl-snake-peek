@@ -1,0 +1,19 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Training artifacts
+checkpoints/
+training_log.csv
+runs/
+
+# Evaluation outputs
+*.mp4
+*.gif

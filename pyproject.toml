@@ -1,0 +1,14 @@
+[project]
+name = "snake-rl"
+version = "0.1.0"
+description = "CNN-based DQN learns Snake with Grad-CAM attention heatmap visualization"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "imageio[ffmpeg]>=2.37.3",
+    "matplotlib>=3.10.8",
+    "numpy>=2.4.4",
+    "tensorboard>=2.20.0",
+    "torch>=2.11.0",
+    "tqdm>=4.67.3",
+]
