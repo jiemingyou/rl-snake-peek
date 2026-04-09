@@ -16,6 +16,7 @@ def parse_args() -> Config:
     parser.add_argument("--total-steps", type=int, default=1_000_000)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--lr-end", type=float, default=1e-5)
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--eps-decay-steps", type=int, default=500_000)
     parser.add_argument("--num-envs", type=int, default=32)
@@ -35,6 +36,7 @@ def parse_args() -> Config:
         total_steps=args.total_steps,
         batch_size=args.batch_size,
         lr=args.lr,
+        lr_end=args.lr_end,
         gamma=args.gamma,
         eps_decay_steps=args.eps_decay_steps,
         num_envs=args.num_envs,
